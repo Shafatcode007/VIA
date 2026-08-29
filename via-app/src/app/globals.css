@@ -1,0 +1,52 @@
+/* NECESSITY: @import url() for Google Fonts MUST precede all other rules (Tailwind, CSS variables).
+   CSS specification requires @import rules to appear before any other statements except @charset
+   and @layer. Placing it after @import "tailwindcss" causes a CSS parse warning in the build. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@500;600;700;800&display=swap');
+@import "tailwindcss";
+
+/* NECESSITY: Custom CSS variables define VIA's brand color palette. The Figma design uses
+   a consistent green (#4DBE55) as the primary accent, with lighter variants for backgrounds.
+   Centralizing these as CSS variables allows Tailwind classes to reference them and ensures
+   color consistency across all components. */
+:root {
+  --via-green: #4DBE55;
+  --via-green-dark: #3da845;
+  --via-green-light: #edf7ee;
+  --via-slate: #71776D;
+  --background: #f7faf7;
+  --foreground: #171717;
+}
+
+/* NECESSITY: Tailwind v4 uses @theme to register custom design tokens that become available
+   as utility classes (e.g., text-via-green, bg-via-green-light). Without this block,
+   Tailwind would not recognize our custom color names. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-via-green: var(--via-green);
+  --color-via-green-dark: var(--via-green-dark);
+  --color-via-green-light: var(--via-green-light);
+  --color-via-slate: var(--via-slate);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'Inter', Arial, Helvetica, sans-serif;
+}
+
+/* NECESSITY: Poppins is used for headings and important text elements in the Figma design.
+   This utility class applies Poppins only to h1-h6 and elements with the .font-heading class. */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Poppins', sans-serif !important;
+}
+
+/* NECESSITY: Tailwind v4 default dark mode support */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}

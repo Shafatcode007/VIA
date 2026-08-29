@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* NECESSITY: Global styles for VIA application */
+/* LOGIC: Imports Tailwind and sets base styles */
+/* EDGE-CASE: None */
+
+body {
+  font-family: 'Inter', sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Poppins', sans-serif;
+}

@@ -1,0 +1,210 @@
+// NECESSITY: This Prisma schema defines the complete database layer required by Auth.js (NextAuth v5)
+// to manage authentication state via Google OAuth. Auth.js mandates four specific models — User,
+// Account, Session, and VerificationToken — to handle OAuth tokens, user sessions, and email
+// verification flows. We extend the User model with `role` and `isProfileComplete` to support
+// VIA's role-based access control (RBAC) system with 5 roles: Resident, Landlord, Seller, Driver, Admin.
+// LOGIC: Each model maps to a database table. The relations follow Auth.js's expected contract:
+//   - A User can have multiple Accounts (Google, Facebook, etc.)
+//   - A User can have multiple active Sessions
+//   - VerificationToken is used for email-based flows (future-proofing)
+//   - `role` defaults to "RESIDENT" since most VIA users are residents
+//   - `isProfileComplete` starts as false; the signIn callback flips it on first login
+// EDGE-CASE: Without these exact models, Auth.js's PrismaAdapter will throw runtime errors.
+// The `id` fields use @id @default(cuid()) for collision-resistant unique identifiers.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ─── USER MODEL ───────────────────────────────────────────────────────────────
+// NECESSITY: Central identity record for every VIA platform user. Auth.js requires
+// `id`, `email`, `name`, and `image` fields on the User model to store OAuth profile data.
+// We add `role` for RBAC and `isProfileComplete` for first-time user onboarding.
+// LOGIC: On first Google OAuth sign-in, the signIn callback creates this record with
+// `role = "RESIDENT"` and `isProfileComplete = false`. Subsequent logins skip creation
+// and only update the `emailVerified` timestamp.
+// EDGE-CASE: The `email` field is optional + unique to handle edge cases where OAuth
+// providers don't return an email, though Google always does.
+model User {
+  id              String    @id @default(cuid())
+  name            String?
+  email           String?   @unique
+  emailVerified   DateTime?
+  image           String?
+  // NECESSITY: Stores the bcrypt hashed password for email/password authentication.
+  // LOGIC: Nullable because Google OAuth users don't have passwords — only users who
+  // register via the manual form will have this field populated.
+  // EDGE-CASE: Without this field, we cannot store credentials-based auth data.
+  password        String?
+  role            String    @default("RESIDENT")
+  isProfileComplete Boolean @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  accounts        Account[]
+  sessions        Session[]
+  // NECESSITY: A landlord can list multiple properties on the platform.
+  // LOGIC: One-to-many relation — one User (landlord) owns many Properties.
+  properties      Property[]
+  // NECESSITY: A tenant can have multiple booking requests across different properties.
+  // LOGIC: One-to-many relation — one User (tenant) can create many Bookings.
+  bookings        Booking[]
+}
+
+// ─── ACCOUNT MODEL ────────────────────────────────────────────────────────────
+// NECESSITY: Stores OAuth provider credentials for each user. Auth.js requires this model
+// to persist the access_token, refresh_token, and provider metadata returned by Google's
+// OAuth 2.0 flow. Without this, sessions would expire on every page reload.
+// LOGIC: Each row represents one OAuth connection. A user who signs in via Google has one
+// Account row with provider = "google". The compound unique constraint on [provider, providerAccountId]
+// prevents duplicate account linking — if someone tries to link the same Google account twice,
+// the database rejects it.
+// EDGE-CASE: The `type = "oauth"` distinguishes this from potential future "email" or
+// "credentials" type accounts. The cascade delete via User ensures orphaned accounts don't exist.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String  @default("oauth")
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+// ─── SESSION MODEL ────────────────────────────────────────────────────────────
+// NECESSITY: Tracks active user sessions for database-backed session strategy. Auth.js uses
+// this to validate that a session cookie corresponds to a real, non-expired session. This is
+// more secure than JWT-only sessions because sessions can be revoked server-side.
+// LOGIC: When a user signs in, Auth.js creates a Session row with an expiry date (typically
+// 30 days). The `sessionToken` maps to the cookie value. On each request, Auth.js checks
+// this table to confirm the session is valid.
+// EDGE-CASE: The `expires` field allows Auth.js to automatically prune expired sessions,
+// preventing unbounded table growth. The cascade delete ensures user deletion removes all sessions.
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── VERIFICATION TOKEN MODEL ─────────────────────────────────────────────────
+// NECESSITY: Required by Auth.js for email-based magic link / OTP flows. Even though VIA
+// currently uses only Google OAuth, this model must exist because Auth.js's PrismaAdapter
+// references it at import time. Removing it causes a schema validation error.
+// LOGIC: The compound unique constraint on [identifier, token] ensures that each verification
+// request is unique per user. The `expires` field prevents replay attacks using old tokens.
+// EDGE-CASE: The `token` field is unique globally to prevent token collisions across different
+// users. This model will become active when email/password auth is added in a future sprint.
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── PROPERTY MODEL ─────────────────────────────────────────────────────────
+// NECESSITY: Core entity for the home rental feature. Each property represents a
+// listing that a landlord publishes on the VIA platform for tenants to browse and book.
+// LOGIC: A property belongs to one landlord (User) and can have multiple bookings.
+// The occupancyCategory field distinguishes between Family and Bachelor rentals.
+// EDGE-CASE: Without this model, the rental marketplace has no listings to display.
+model Property {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  price       Float
+  location    String
+  address     String
+  city        String   @default("Dhaka")
+  // NECESSITY: Categorizes properties as Family or Bachelor for targeted search.
+  // LOGIC: Stored as String because SQLite does not support enum types.
+  // Defaults to FAMILY so new listings are family-friendly by default.
+  occupancyCategory String  @default("FAMILY")
+  // NECESSITY: Sub-type for Bachelor properties only. Null for Family properties.
+  // LOGIC: Valid values are FULL_ROOM, PORTION, SEAT. Only applicable when
+  // occupancyCategory is BACHELOR. The superRefine validation enforces this constraint.
+  bachelorType      String?
+  // NECESSITY: Number of units available (1 for full property, X for seats/portion).
+  // LOGIC: Defaults to 1. For seat-type bachelor rentals, this indicates total seats.
+  totalUnits        Int     @default(1)
+  // NECESSITY: Legacy property type field kept for backward compatibility.
+  // LOGIC: Defaults to APARTMENT. New code should use occupancyCategory instead.
+  propertyType      String  @default("APARTMENT")
+  // NECESSITY: Tracks listing lifecycle. Valid values: AVAILABLE, PENDING, RENTED, INACTIVE.
+  // LOGIC: Defaults to AVAILABLE so new listings appear in search immediately.
+  status      String   @default("AVAILABLE")
+
+  // Property Details
+  bedrooms    Int      @default(0)
+  bathrooms   Int      @default(0)
+  area        Float?   // in sq ft
+  furnished   Boolean  @default(false)
+  // NECESSITY: Stores amenities as JSON string array (e.g., '["WiFi","Parking","AC"]').
+  // LOGIC: SQLite does not support native arrays, so we serialize to JSON.
+  amenities   String   @default("[]")
+  // NECESSITY: Stores image URLs as JSON string array.
+  // LOGIC: Same JSON serialization approach as amenities for SQLite compatibility.
+  images      String   @default("[]")
+
+  // Relations
+  landlordId  String
+  landlord    User     @relation(fields: [landlordId], references: [id], onDelete: Cascade)
+  bookings    Booking[]
+
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Indexes for search performance
+  @@index([occupancyCategory, bachelorType])
+  @@index([status])
+}
+
+// ─── BOOKING MODEL ──────────────────────────────────────────────────────────
+// NECESSITY: Tracks rental requests from tenants to landlords. Each booking
+// represents a time-bound reservation for a specific property.
+// LOGIC: A booking links a tenant (User) to a property. The status tracks the
+// approval workflow: PENDING → CONFIRMED/REJECTED → COMPLETED/CANCELLED.
+// EDGE-CASE: The unique constraint on [propertyId, startDate] prevents double-booking
+// the same property for overlapping dates.
+model Booking {
+  id          String   @id @default(cuid())
+  propertyId  String
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  tenantId    String
+  tenant      User     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  startDate   DateTime
+  endDate     DateTime
+  // NECESSITY: Tracks booking status. Valid values: PENDING, CONFIRMED, REJECTED, CANCELLED, COMPLETED.
+  // LOGIC: Defaults to PENDING so landlords must approve before the booking is active.
+  status      String   @default("PENDING")
+
+  // NECESSITY: Store agreed price at time of booking (may differ from current property price).
+  // LOGIC: Captures the price snapshot so historical bookings aren't affected by price changes.
+  totalPrice  Float
+
+  message     String?  // Optional message from tenant to landlord
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([propertyId, startDate])
+}
